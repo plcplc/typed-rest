@@ -11,7 +11,8 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
--- | This module defines typed REST API signatures, and machinery for serving them.
+-- | This module defines typed REST API signatures, common for both servers and
+-- clients.
 module Network.HTTP.Rest.Signature (
 
   -- * REST Resource Signatures.
@@ -30,10 +31,11 @@ import GHC.TypeLits
 -- | A data type representing the signature of a single REST resource. It uses
 -- the datatype 'HttpMethodKind' promoted to a kind to express a type-list of accepted
 -- http methods.
+-- Note that @method :: HttpMethodKind@ and @path :: HttpPathKind@.
 data RestSig :: HttpPathKind -> HttpMethodKind -> * where
-  RestResource :: RestSig a b
+  RestResource :: RestSig path method
 
--- | A datatype representing a Http method. It's used promoted to a kind in 'RestSig'.
+-- | A datatype representing a Http method. It's used promoted to a kind in its use in 'RestSig'.
 data HttpMethodKind where
   HttpOptions :: HttpMethodKind
   HttpGet     :: response -> HttpMethodKind
@@ -45,27 +47,31 @@ data HttpMethodKind where
   HttpConnect :: HttpMethodKind
 
 -- | A HttpPath used exclusively as a Kind, to be able to specify resource urls as types only.
+--
+-- (constructor doc, to be placed appropriately pending haddock ticket #43):
+--
+-- [@component :/: rest@] Path composition, infix and right associative, with precedence 4,
+-- which is low enough to not require parentheses when applied with 'A' and 'S'.
+--
+-- [@Nil@] Terminate a http path.
+--
 data HttpPathKind where
-
-  -- (doc pending haddock ticket #43)
-  -- . | Path composition, infix and right associative, with precedence 4,
-  -- which is low enough to not require parentheses when applied with 'A' and 'S'.
   (:/:) :: PathComponentKind -> HttpPathKind -> HttpPathKind
-
-  -- (Same as above)
-  -- . | Terminate a http path.
   Nil :: HttpPathKind
 
 infixr 4 :/:
 
--- | The kind containing types of HttpPathKind components. Components may be either constants or variables.
+-- | The kind containing types of 'HttpPathKind' components. Components may be
+-- either literals or variables with a type.
+--
+-- (constructor doc, to be placed appropriately pending haddock ticket #43):
+--
+-- [@S \"symbol\"@] A constant literal path component.
+--
+-- [@A \"symbol\" type@] A variable path component.
+--
 data PathComponentKind where
-  -- (doc pending haddock ticket #43)
-  -- . | A constant component.
   S :: Symbol -> PathComponentKind
-
-  -- (doc pending haddock ticket #43)
-  -- . | A variable component.
   A :: Symbol -> a -> PathComponentKind
 
 -- | Make all types of PathComponentKind reflectable as values. For now we just
@@ -109,6 +115,7 @@ instance SingE (Kind :: HttpPathKind) String where
 -- | To properly serialise HttpPathFn path arguments we need a dedicated
 -- typeclass, as opposed to just Show or ToJson. Instances of this class should
 -- take care to obey the restrictions of resource paths in Http.
+-- (Alternatively we could just urlencode the output of 'Show')
 class HttpPathArgument a where
 
   -- | Serialize a path argument.

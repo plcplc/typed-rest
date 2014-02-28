@@ -11,13 +11,16 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
--- | This module defines the machinery for serving typed REST API signatures.
+-- | This module defines the machinery for serving typed REST API signatures,
+-- by utilising the Wai server infrastructure. It is capable of wrapping
+-- resource serving functions (with type signatures corresponding to given
+-- 'RestSig's) as Wai middleware.
 module Network.HTTP.Rest.Server (
 
   -- * Serving Resource Signatures
-  ApplyHttpPathFn(..),
-  ResponseType,
   ServeResource(..),
+  ApplyHttpPathFn(..),
+  ResponseType
 
   ) where
 
@@ -33,21 +36,23 @@ import Data.Typeable
 
 import Network.HTTP.Rest.Signature
 
--- | A response type that manually encodes every aspect of a http response. I'm
--- hoping to replace this with some more type structure at the RestSig level.
+-- | A response type that manually encodes aspects of a http response.
 type ResponseType a = (Status, ResponseHeaders, a)
 
--- | Serving of REST resources is encapsulated in this typeclass. (Necessary
--- because we need different cases for each type of HttpMethod?)
-class (SingI path) => ApplyHttpPathFn (path :: HttpPathKind {- RestSig path method -}) where
+-- | A typeclass to apply resource-serving functions, 'HttpPathFn', to slightly
+-- decomposed requests (consisting of a list of path components and a
+-- deserialised request payload), giving 'Nothing' if the request path did not
+-- match the signature. Note that 'path :: HttpPathKind'.
+class (SingI path) => ApplyHttpPathFn (path :: HttpPathKind) where
 
-  -- | A type family for translating HttpPathKind types with response types to function types.
+  -- | A type family for translating HttpPathKind types with response types to
+  -- function types.
   type HttpPathFn path req resp :: *
 
   -- | A function to apply 'HttpPathFn's to the path they match.
   applyHttpPathFn :: Sing path -> [Text] -> req -> HttpPathFn path req resp -> Maybe (IO (ResponseType resp))
 
--- The ApplyHttpPathFn for empty paths.
+-- | The 'ApplyHttpPathFn' case for empty paths.
 instance ApplyHttpPathFn Nil where
 
   type HttpPathFn Nil req resp = req -> IO (ResponseType resp)
@@ -56,7 +61,7 @@ instance ApplyHttpPathFn Nil where
   applyHttpPathFn _ [] req fn = Just (fn req)
   applyHttpPathFn _ _  _   _ = Nothing
 
--- The ApplyHttpPathFn for non-empty paths that pass arguments to the given HttpPathFn.
+-- | The 'ApplyHttpPathFn' case for variable path components (that pass arguments to the given 'HttpPathFn').
 instance
   (ApplyHttpPathFn rest,
   SingI pathSig,
@@ -78,7 +83,7 @@ instance
       _                -> Nothing
   applyHttpPathFn _ [] _ _ = Nothing
 
--- The ApplyHttpPathFn for non-empty paths that do not pass arguments to the given HttpPathFn.
+-- | The 'ApplyHttpPathFn' case for constant literal path components (that do not pass arguments to the given 'HttpPathFn').
 instance
   (ApplyHttpPathFn rest, SingI pathSig) =>
   ApplyHttpPathFn (S pathSig :/: rest) where
@@ -96,12 +101,17 @@ instance
       _    -> Nothing
   applyHttpPathFn _ [] _ _ = Nothing
 
--- | A typeclass to wrap 'HttpPathFn's in 'Application's.
-class (ApplyHttpPathFn pathSig) => ServeResource (pathSig :: HttpPathKind) (method :: HttpMethodKind) where
+-- | A typeclass to wrap 'HttpPathFn's into 'Application's.  Note that @method
+-- :: HttpMethodKind@ and @path :: HttpPathKind@.  This class is the primary
+-- interface to this module, and 'serveRest' should satisfy all your needs.
+class (ApplyHttpPathFn pathSig) =>
+  ServeResource (pathSig :: HttpPathKind) (method :: HttpMethodKind) where
 
+  -- | An associated type that gives the final resulting function signature to
+  -- serve a resource.
   type HttpMethodFn pathSig method :: *
 
-  -- | A function that wraps a 'HttpPathFn' in an 'Application' (?). For requests
+  -- | A function that wraps a 'HttpPathFn' in a piece of Wai 'Middleware'. For requests
   -- that don't match, we delegate to another 'Application'.
   serveRest :: (SingI pathSig) =>
     RestSig pathSig method -> HttpMethodFn pathSig method -> Application -> Application

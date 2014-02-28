@@ -12,16 +12,17 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
--- | This module defines the machinery for typed querying of REST API signatures.
+-- | This module defines the machinery for typed querying of REST API
+-- signatures. It uses the functions and types from the @http-client@ package.
 module Network.HTTP.Rest.Client (
 
   -- * Convenience wrappers
-  requestResourceManager,
+  requestResource,
   requestResourceDef,
 
   -- * Typeclasses for requesting resources.
-  RequestBuilder(..),
-  RequestResource(..)
+  RequestResource(..),
+  RequestBuilder(..)
 
   ) where
 
@@ -55,18 +56,20 @@ prependReqPath pathElem req = req {
     }
 
 -- | Typeclass that enables construction of a Request that matches a given HttpPath.
--- (... Gotta give this a better name ...)
+-- Note that @path :: HttpPathKind@.
 class (SingI path) => RequestBuilder (path :: HttpPathKind) where
 
   -- | An associated type that gives the function type that corresponds to the
-  -- HttpPath.
+  -- HttpPath. This means an argument of type @a@ for every @A \"symbol\" a@
+  -- component.
   type RequestPathSig path resp :: *
 
   -- | Guided by a HttpPath, and given a continuation on the final request, we
-  -- have a function that translates each of the variable components of 'path'
+  -- have a function that translates each of the variable components of @path@
   -- to function arguments.
   requestBuilder :: Sing path -> (Request -> resp) -> RequestPathSig path resp
 
+-- | The RequestBuilder case for empty http paths.
 instance (SingI 'Nil) => RequestBuilder 'Nil where
 
   -- The case for 'Nil is just Request - no more path segments to construct.
@@ -75,6 +78,7 @@ instance (SingI 'Nil) => RequestBuilder 'Nil where
   requestBuilder :: Sing 'Nil -> (Request -> resp) -> RequestPathSig 'Nil resp
   requestBuilder _ k = k $ def { path = "" }
 
+-- | The RequestBuilder case for literal http path components.
 instance (
   SingI (S pathSig :/: rest),
   SingI (S pathSig),
@@ -82,7 +86,7 @@ instance (
   RequestBuilder rest)
   => RequestBuilder (S pathSig :/: rest) where
 
-  -- The case for 'S sig :/: rest' reduces to 'rest'.
+  -- The case for @S sig :/: rest@ reduces to @rest@.
   type RequestPathSig (S pathSig :/: rest) resp = RequestPathSig rest resp
 
   requestBuilder ::
@@ -92,6 +96,7 @@ instance (
 
   requestBuilder _ k = requestBuilder (sing :: Sing rest) (k . (prependReqPath $ pack $ fromSing (sing :: Sing (S pathSig))))
 
+-- | The RequestBuilder case for variable http path components.
 instance (
   SingI (A pathSig a :/: rest),
   SingI (A pathSig a),
@@ -106,20 +111,26 @@ instance (
   requestBuilder :: Sing (A pathSig a :/: rest) -> (Request -> resp) -> RequestPathSig (A pathSig a :/: rest) resp
   requestBuilder _ k x = requestBuilder (sing :: Sing rest) (k . (prependReqPath $ toPathArg x))
 
--- Given a RestSig we construct a function that queries the resource through 'http-client'.
+-- | Given a 'RestSig' we construct a function that queries the resource through \'http-client\'.
+-- Note that @method :: HttpMethodKind@ and @path :: HttpPathKind@.
 class RequestResource (path :: HttpPathKind) (method :: HttpMethodKind) where
 
+  -- | Associated type to translate the payload types used in the given method.
+  -- For GET requests for instance this reduces to the type of the server
+  -- response payload, while POST requests also carry a data payload in
+  -- addition to that of the response.
   type RequestMethodSig method :: *
 
   -- | Given an IO action that actually requests the resource, we give a
   -- function that takes all the request parameters (as given by the path and
   -- method) and performs the request.
-  requestResource ::
+  requestResourceK ::
        (Request -> IO (Response LBS.ByteString))
     -> Text
     -> RestSig path method
     -> RequestPathSig path (RequestMethodSig method)
 
+-- | The RequestResource instance for GET requests.
 instance
   (SingI path,
   FromJSON resp,
@@ -128,13 +139,13 @@ instance
 
   type RequestMethodSig ('HttpGet resp) = IO resp
 
-  requestResource ::
+  requestResourceK ::
        (Request -> IO (Response LBS.ByteString))
     -> Text
     -> RestSig path ('HttpGet resp)
     -> RequestPathSig path (RequestMethodSig ('HttpGet resp))
 
-  requestResource issuer hostNm _ =
+  requestResourceK issuer hostNm _ =
     requestBuilder
       (sing :: Sing path)
       (\req -> decodeResp <$> issuer (encodeRequest req))
@@ -149,6 +160,7 @@ instance
       decodeResp :: Response LBS.ByteString -> resp
       decodeResp = fromJust . decode . responseBody
 
+-- | The RequestResource instance for POST requests.
 instance
   (SingI path,
   ToJSON req,
@@ -158,13 +170,13 @@ instance
 
   type RequestMethodSig ('HttpPost req resp) = req -> IO resp
 
-  requestResource ::
+  requestResourceK ::
        (Request -> IO (Response LBS.ByteString))
     -> Text
     -> RestSig path ('HttpPost req resp)
     -> RequestPathSig path (RequestMethodSig ('HttpPost req resp))
 
-  requestResource issuer hostNm _ =
+  requestResourceK issuer hostNm _ =
     requestBuilder
       (sing :: Sing path)
       (\req body -> decodeResp <$> issuer (encodeRequest req body))
@@ -180,24 +192,25 @@ instance
       decodeResp :: Response LBS.ByteString -> resp
       decodeResp = fromJust . decode . responseBody
 
--- | Request a resource, given a 'Manager'.
-requestResourceManager ::
+-- | Request a resource: @requestResource manager hostname signature
+-- \<RequestPathSig arguments\>@. The 'Manager' concept is from the @http-client@ package.
+requestResource ::
   RequestResource path method =>
     Manager ->
     Text ->
     RestSig path method ->
     RequestPathSig path (RequestMethodSig method)
 
-requestResourceManager man hostNm sig = requestResource (flip httpLbs man) hostNm sig
+requestResource man hostNm sig = requestResourceK (flip httpLbs man) hostNm sig
 
--- | Request a resource, using the default 'Manager'.
+-- | Request a resource, using the default 'Manager' as defined in @http-client@.
 requestResourceDef ::
   RequestResource path method =>
     Text ->
     RestSig path method ->
     RequestPathSig path (RequestMethodSig method)
 
-requestResourceDef hostNm sig = requestResource
+requestResourceDef hostNm sig = requestResourceK
   (\req -> do
     man <- newManager defaultManagerSettings
     resp <- httpLbs req man
