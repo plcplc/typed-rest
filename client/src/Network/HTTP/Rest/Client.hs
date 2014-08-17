@@ -35,6 +35,7 @@ import Data.Default
 import Data.Maybe
 import Data.Text (Text, pack)
 import Data.Text.Encoding (encodeUtf8)
+import Data.Proxy
 
 import GHC.TypeLits
 
@@ -57,7 +58,7 @@ prependReqPath pathElem req = req {
 
 -- | Typeclass that enables construction of a Request that matches a given HttpPath.
 -- Note that @path :: HttpPathKind@.
-class (SingI path) => RequestBuilder (path :: HttpPathKind) where
+class RequestBuilder (path :: HttpPathKind) where
 
   -- | An associated type that gives the function type that corresponds to the
   -- HttpPath. This means an argument of type @a@ for every @A \"symbol\" a@
@@ -67,49 +68,45 @@ class (SingI path) => RequestBuilder (path :: HttpPathKind) where
   -- | Guided by a HttpPath, and given a continuation on the final request, we
   -- have a function that translates each of the variable components of @path@
   -- to function arguments.
-  requestBuilder :: Sing path -> (Request -> resp) -> RequestPathSig path resp
+  requestBuilder :: Proxy path -> (Request -> resp) -> RequestPathSig path resp
 
 -- | The RequestBuilder case for empty http paths.
-instance (SingI 'Nil) => RequestBuilder 'Nil where
+instance RequestBuilder 'Nil where
 
   -- The case for 'Nil is just Request - no more path segments to construct.
   type RequestPathSig 'Nil resp = resp
 
-  requestBuilder :: Sing 'Nil -> (Request -> resp) -> RequestPathSig 'Nil resp
+  requestBuilder :: Proxy 'Nil -> (Request -> resp) -> RequestPathSig 'Nil resp
   requestBuilder _ k = k $ def { path = "" }
 
 -- | The RequestBuilder case for literal http path components.
 instance (
-  SingI (S pathSig :/: rest),
-  SingI (S pathSig),
-  SingI rest,
-  RequestBuilder rest)
-  => RequestBuilder (S pathSig :/: rest) where
+    RequestBuilder rest,
+    KnownSymbol pathSig
+    ) => RequestBuilder (S pathSig :/: rest) where
 
   -- The case for @S sig :/: rest@ reduces to @rest@.
   type RequestPathSig (S pathSig :/: rest) resp = RequestPathSig rest resp
 
   requestBuilder ::
-       Sing (S pathSig :/: rest)
+       Proxy (S pathSig :/: rest)
     -> (Request -> resp)
     -> RequestPathSig (S pathSig :/: rest) resp
 
-  requestBuilder _ k = requestBuilder (sing :: Sing rest) (k . (prependReqPath $ pack $ fromSing (sing :: Sing (S pathSig))))
+  requestBuilder _ k = requestBuilder (Proxy :: Proxy rest) (k . (prependReqPath $ pack $ symbolVal (Proxy :: Proxy pathSig)))
+
 
 -- | The RequestBuilder case for variable http path components.
 instance (
-  SingI (A pathSig a :/: rest),
-  SingI (A pathSig a),
   HttpPathArgument a,
-  SingI rest,
   RequestBuilder rest)
   => RequestBuilder (A pathSig a :/: rest) where
 
   -- The case for 'A sig a :/: rest' gives an actual function.
   type RequestPathSig (A pathSig a :/: rest) resp = a -> RequestPathSig rest resp
 
-  requestBuilder :: Sing (A pathSig a :/: rest) -> (Request -> resp) -> RequestPathSig (A pathSig a :/: rest) resp
-  requestBuilder _ k x = requestBuilder (sing :: Sing rest) (k . (prependReqPath $ toPathArg x))
+  requestBuilder :: Proxy (A pathSig a :/: rest) -> (Request -> resp) -> RequestPathSig (A pathSig a :/: rest) resp
+  requestBuilder _ k x = requestBuilder (Proxy :: Proxy rest) (k . (prependReqPath $ toPathArg x))
 
 -- | Given a 'RestSig' we construct a function that queries the resource through \'http-client\'.
 -- Note that @method :: HttpMethodKind@ and @path :: HttpPathKind@.
@@ -130,10 +127,10 @@ class RequestResource (path :: HttpPathKind) (method :: HttpMethodKind) where
     -> RestSig path method
     -> RequestPathSig path (RequestMethodSig method)
 
+
 -- | The RequestResource instance for GET requests.
 instance
-  (SingI path,
-  FromJSON resp,
+  (FromJSON resp,
   RequestBuilder path)
   => RequestResource path ('HttpGet resp) where
 
@@ -147,7 +144,7 @@ instance
 
   requestResourceK issuer hostNm _ =
     requestBuilder
-      (sing :: Sing path)
+      (Proxy :: Proxy path)
       (\req -> decodeResp <$> issuer (encodeRequest req))
 
     where
@@ -162,8 +159,7 @@ instance
 
 -- | The RequestResource instance for POST requests.
 instance
-  (SingI path,
-  ToJSON req,
+  (ToJSON req,
   FromJSON resp,
   RequestBuilder path)
   => RequestResource path ('HttpPost req resp) where
@@ -178,7 +174,7 @@ instance
 
   requestResourceK issuer hostNm _ =
     requestBuilder
-      (sing :: Sing path)
+      (Proxy :: Proxy path)
       (\req body -> decodeResp <$> issuer (encodeRequest req body))
 
     where

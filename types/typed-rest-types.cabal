@@ -22,7 +22,7 @@ library
     Network.HTTP.Rest.Signature
 
   build-depends:
-    base >=4.6 && <4.7,
+    base == 4.7.*,
     text
 
   hs-source-dirs: src

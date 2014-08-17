@@ -10,6 +10,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE GADTs #-}
 -- | This module defines typed REST API signatures, common for both servers and
 -- clients.
@@ -20,13 +21,15 @@ module Network.HTTP.Rest.Signature (
   HttpMethodKind(..),
   HttpPathKind(..),
   PathComponentKind(..),
-  HttpPathArgument(..),
+  HttpPathArgument(..)
 
   ) where
 
 import Data.Text (Text, pack, unpack)
 import Data.Typeable
 import GHC.TypeLits
+
+data MyProxy (x :: k) = MyProxy
 
 -- | A data type representing the signature of a single REST resource. It uses
 -- the datatype 'HttpMethodKind' promoted to a kind to express a type-list of accepted
@@ -72,45 +75,67 @@ infixr 4 :/:
 --
 data PathComponentKind where
   S :: Symbol -> PathComponentKind
-  A :: Symbol -> a -> PathComponentKind
+  A :: Symbol -> (a :: *) -> PathComponentKind
 
 -- | Make all types of PathComponentKind reflectable as values. For now we just
 -- reflect to Strings, so our Sing-suite is a bit like Show.
-data instance Sing (a :: PathComponentKind) = SingPathComponent String
+-- data instance Sing (a :: PathComponentKind) = SingPathComponent String
 
 -- | Sing-introduction instance for constant path components.
-instance (SingI res) => SingI (S res) where
-  sing = SingPathComponent $ fromSing (sing :: Sing res)
+-- instance (SingI res) => SingI (S res) where
+--  sing = SingPathComponent $ fromSing (sing :: Sing res)
 
 -- | Sing-introduction instance for variable path components.
-instance (SingI res, Typeable a) => SingI (A res a) where
-  sing = SingPathComponent $ "{" ++ (fromSing (sing :: Sing res)) ++ " :: " ++ (show $ typeOf (undefined :: a)) ++ "}"
+--instance (SingI res, Typeable a) => SingI (A res a) where
+--sing = SingPathComponent $ "{" ++ (fromSing (sing :: Sing res)) ++ " :: " ++ (show $ typeOf (undefined :: a)) ++ "}"
+
+-- showPathComponent :: Proxy (pck :: PathComponentKind) -> String
+-- showPathComponent p@(Proxy :: Proxy (S a)) = showPathComponentS p
+-- showPathComponent p@(Proxy :: Proxy (A a x)) = showPathComponentA p
+
+instance (KnownSymbol a) => Show (MyProxy (S a)) where
+ show (MyProxy :: MyProxy (S a)) = symbolVal (MyProxy :: MyProxy a)
+
+instance (KnownSymbol a, Typeable x) => Show (MyProxy (A a (x :: *))) where
+ show (MyProxy :: MyProxy (A a x)) = "{" ++ symbolVal (MyProxy :: MyProxy a) ++ " :: " ++ show (typeOf (undefined :: x)) ++ "}"
+
+instance (Show (MyProxy c), Show (MyProxy httpPath)) => Show (MyProxy (c :/: httpPath)) where
+  show (MyProxy :: MyProxy (c :/: httpPath)) = show (MyProxy :: MyProxy c) ++ "/" ++ show (MyProxy :: MyProxy httpPath)
+
+instance Show (MyProxy Nil) where
+  show _ = ""
 
 -- | Sing-elimination, that simply unwraps tha data instance to a String.  Note
 -- by the way the presence of a Show instance with context '(SingE (Kind :: k)
 -- rep, Show rep)'.
-instance SingE (Kind :: PathComponentKind) String where
-  fromSing (SingPathComponent component) = component
+-- instance SingE (Kind :: PathComponentKind) String where
+--  fromSing (SingPathComponent component) = component
 
 -- | We create a Sing (short for singleton) instance to hook into the
 -- GHC.TypeLits mechanism for going from type level to value level.  This is
 -- facilitated by the typeclasses SingI and SingE.
-data instance Sing (a :: HttpPathKind) = SingHttpPath [String]
+-- data instance Sing (a :: HttpPathKind) = SingHttpPath [String]
 
 -- Sing-introduction for Nil.
-instance SingI Nil where
-  sing = SingHttpPath []
+-- instance SingI Nil where
+--   sing = SingHttpPath []
+
+-- showHttpPathNil :: Proxy Nil -> String
+-- showHttpPathNil _ = ""
+
+-- showHttpPathCons :: Proxy (component :/: httpPath) -> String
+-- showHttpPathCons _ = ""
 
 -- Sing-introduction for (:/:).
-instance (SingI httpPath, SingI component) =>
-  SingI ((component :: PathComponentKind) :/: (httpPath :: HttpPathKind)) where
-  sing = let SingHttpPath rest = sing :: Sing httpPath
-             top = fromSing (sing :: Sing component) :: String
-         in SingHttpPath $ top : rest
-
--- | Sing-elimination, that simply unwraps tha data instance to a String.
-instance SingE (Kind :: HttpPathKind) String where
-  fromSing (SingHttpPath lst) = Prelude.foldl (\x y -> x ++ "/" ++ y) "" lst
+--instance (SingI httpPath, SingI component) =>
+--  SingI ((component :: PathComponentKind) :/: (httpPath :: HttpPathKind)) where
+--  sing = let SingHttpPath rest = sing :: Sing httpPath
+--             top = fromSing (sing :: Sing component) :: String
+--         in SingHttpPath $ top : rest
+--
+---- | Sing-elimination, that simply unwraps tha data instance to a String.
+--instance SingE (Kind :: HttpPathKind) String where
+--  fromSing (SingHttpPath lst) = Prelude.foldl (\x y -> x ++ "/" ++ y) "" lst
 
 -- | To properly serialise HttpPathFn path arguments we need a dedicated
 -- typeclass, as opposed to just Show or ToJson. Instances of this class should
