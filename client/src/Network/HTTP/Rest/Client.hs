@@ -17,198 +17,217 @@
 module Network.HTTP.Rest.Client (
 
   -- * Convenience wrappers
-  requestResource,
-  requestResourceDef,
+  requestHttpClient,
+  requestHttpClientDef,
+  buildUrl,
 
-  -- * Typeclasses for requesting resources.
-  RequestResource(..),
-  RequestBuilder(..)
+  -- * Typeclasses for requesting resources
+  --RequestResource(..),
+  RequestPath(..),
+  RequestMethod(..),
+  requestK,
+
+  -- * Internal functions, exposed for testing mainly
+  toPathComponents,
+  fromPathComponents
 
   ) where
 
 import Control.Applicative
 
-import Data.Aeson (FromJSON,ToJSON, decode, encode)
-import qualified Data.ByteString as BS
+import Data.Aeson (FromJSON,ToJSON, fromJSON, encode, Result(..))
+import Data.Aeson.Parser (value')
+import Data.Attoparsec.ByteString (maybeResult, parse)
+import qualified Data.ByteString.UTF8 as BSU8
 import qualified Data.ByteString.Lazy as LBS
-import Data.Default
-import Data.Maybe
-import Data.Text (Text, pack)
-import Data.Text.Encoding (encodeUtf8)
 import Data.Proxy
+import Data.Text hiding (filter, foldr)
 
 import GHC.TypeLits
 
-import Network.HTTP.Client
-  (defaultManagerSettings, httpLbs, Manager, newManager,
-  Request(..), RequestBody(..), Response(..), closeManager)
-
+import Network.HTTP.Client hiding (Proxy)
 import Network.HTTP.Types.Method (methodGet, methodPost)
 
 import Network.HTTP.Rest.Signature
 
-prependReqPath :: Text -> Request -> Request
-prependReqPath pathElem req = req {
-  path = BS.concat $
-    (encodeUtf8 pathElem)
-    :(if BS.empty == path req
-        then []
-        else [encodeUtf8 $ pack "/", path req])
-    }
-
--- | Typeclass that enables construction of a Request that matches a given HttpPath.
+-- | Typeclass that enables construction of a url that matches a given HttpPath.
 -- Note that @path :: HttpPathKind@.
-class RequestBuilder (path :: HttpPathKind) where
+class RequestPath (path :: HttpPathKind) where
 
   -- | An associated type that gives the function type that corresponds to the
   -- HttpPath. This means an argument of type @a@ for every @A \"symbol\" a@
   -- component.
-  type RequestPathSig path resp :: *
+  type RequestPathFn path result :: *
 
-  -- | Guided by a HttpPath, and given a continuation on the final request, we
+  -- | Guided by a HttpPath and an initial root path segment, we
   -- have a function that translates each of the variable components of @path@
   -- to function arguments.
-  requestBuilder :: Proxy path -> (Request -> resp) -> RequestPathSig path resp
+  requestPath :: Proxy path -> ([String] -> result) -> [String] -> RequestPathFn path result
 
--- | The RequestBuilder case for empty http paths.
-instance RequestBuilder 'Nil where
+-- | The case for empty http paths.
+instance RequestPath 'Nil where
 
-  -- The case for 'Nil is just Request - no more path segments to construct.
-  type RequestPathSig 'Nil resp = resp
+  -- The case for 'Nil is just 'result' - no more path segments to construct.
+  type RequestPathFn 'Nil result = result
 
-  requestBuilder :: Proxy 'Nil -> (Request -> resp) -> RequestPathSig 'Nil resp
-  requestBuilder _ k = k $ def { path = "" }
+  requestPath :: Proxy 'Nil -> ([String] -> result) -> [String] -> RequestPathFn 'Nil result
+  requestPath _ k p = k p
 
--- | The RequestBuilder case for literal http path components.
+-- | The case for literal http path components.
 instance (
-    RequestBuilder rest,
-    KnownSymbol pathSig
-    ) => RequestBuilder (S pathSig :/: rest) where
+    RequestPath rest,
+    KnownSymbol path
+    ) => RequestPath (S path :/: rest) where
 
   -- The case for @S sig :/: rest@ reduces to @rest@.
-  type RequestPathSig (S pathSig :/: rest) resp = RequestPathSig rest resp
+  type RequestPathFn (S path :/: rest) result = RequestPathFn rest result
 
-  requestBuilder ::
-       Proxy (S pathSig :/: rest)
-    -> (Request -> resp)
-    -> RequestPathSig (S pathSig :/: rest) resp
+  requestPath ::
+       Proxy (S path :/: rest)
+    -> ([String] -> result)
+    -> [String]
+    -> RequestPathFn (S path :/: rest) result
 
-  requestBuilder _ k = requestBuilder (Proxy :: Proxy rest) (k . (prependReqPath $ pack $ symbolVal (Proxy :: Proxy pathSig)))
+  requestPath _ k p = requestPath (Proxy :: Proxy rest) k (p ++ [symbolVal (Proxy :: Proxy path)])
 
-
--- | The RequestBuilder case for variable http path components.
+-- | The RequestPath case for variable http path components.
 instance (
   HttpPathArgument a,
-  RequestBuilder rest)
-  => RequestBuilder (A pathSig a :/: rest) where
+  RequestPath rest)
+  => RequestPath (A path a :/: rest) where
 
   -- The case for 'A sig a :/: rest' gives an actual function.
-  type RequestPathSig (A pathSig a :/: rest) resp = a -> RequestPathSig rest resp
+  type RequestPathFn (A path a :/: rest) result = a -> RequestPathFn rest result
 
-  requestBuilder :: Proxy (A pathSig a :/: rest) -> (Request -> resp) -> RequestPathSig (A pathSig a :/: rest) resp
-  requestBuilder _ k x = requestBuilder (Proxy :: Proxy rest) (k . (prependReqPath $ toPathArg x))
+  requestPath ::
+    Proxy (A path a :/: rest)
+    -> ([String] -> result)
+    -> [String]
+    -> RequestPathFn (A path a :/: rest) result
+  requestPath _ k p x = requestPath (Proxy :: Proxy rest) k
+    (p ++ [unpack $ toPathArg x])
 
--- | Given a 'RestSig' we construct a function that queries the resource through \'http-client\'.
--- Note that @method :: HttpMethodKind@ and @path :: HttpPathKind@.
-class RequestResource (path :: HttpPathKind) (method :: HttpMethodKind) where
+-- | Convenience wrapper around 'requestPath' for urls without a prefix.
+-- (initial "/" is added automatically)
+buildUrl :: RequestPath path => Proxy path -> RequestPathFn path String
+buildUrl p = requestPath p fromPathComponents []
 
-  -- | Associated type to translate the payload types used in the given method.
-  -- For GET requests for instance this reduces to the type of the server
-  -- response payload, while POST requests also carry a data payload in
-  -- addition to that of the response.
-  type RequestMethodSig method :: *
+-- | Type class to construct a function that constructs Requests based on
+-- a 'method :: HttpMethodKind'.
+class RequestMethod (method :: HttpMethodKind) where
 
-  -- | Given an IO action that actually requests the resource, we give a
-  -- function that takes all the request parameters (as given by the path and
-  -- method) and performs the request.
-  requestResourceK ::
-       (Request -> IO (Response LBS.ByteString))
-    -> Text
-    -> RestSig path method
-    -> RequestPathSig path (RequestMethodSig method)
+  type RequestMethodFn (f :: * -> *) method :: *
 
+  requestMethod :: Functor f =>
+       Proxy method
+    -> (Request -> f LBS.ByteString)
+    -> Request
+    -> RequestMethodFn f method
 
--- | The RequestResource instance for GET requests.
-instance
-  (FromJSON resp,
-  RequestBuilder path)
-  => RequestResource path ('HttpGet resp) where
+-- | The RequestMethod instance for GET requests.
+instance (FromJSON resp) => RequestMethod ('HttpGet resp) where
 
-  type RequestMethodSig ('HttpGet resp) = IO resp
+  type RequestMethodFn f ('HttpGet resp) = f resp
 
-  requestResourceK ::
-       (Request -> IO (Response LBS.ByteString))
-    -> Text
-    -> RestSig path ('HttpGet resp)
-    -> RequestPathSig path (RequestMethodSig ('HttpGet resp))
+  requestMethod :: Functor f =>
+       Proxy ('HttpGet resp)
+    -> (Request -> f LBS.ByteString)
+    -> Request
+    -> RequestMethodFn f ('HttpGet resp)
 
-  requestResourceK issuer hostNm _ =
-    requestBuilder
-      (Proxy :: Proxy path)
-      (\req -> decodeResp <$> issuer (encodeRequest req))
+  requestMethod _ act request = parseNonRfcJson <$> act (setMethod request)
 
     where
 
-      encodeRequest :: Request -> Request
-      encodeRequest request = request {
-        method = methodGet,
-        host = encodeUtf8 hostNm}
+      setMethod :: Request -> Request
+      setMethod req = req { method = methodGet }
 
-      decodeResp :: Response LBS.ByteString -> resp
-      decodeResp = fromJust . decode . responseBody
+-- | RFC-4627 sucks cocks in hell. We have to go all the way around
+-- Data.Aeson and use the low-level attoparsec tools to get beyond the
+-- only-objects-at-top-level restriction. Why on earth would you sacrifice
+-- having encode/decode an isomorphism just to comply with an RFC?.
+-- Sorry potential readers, I'm just venting steam...
+parseNonRfcJson :: FromJSON a => LBS.ByteString -> a
+parseNonRfcJson lbs = let
+  bs          = LBS.toStrict lbs
+  Just val    = maybeResult $ parse value' bs
+  Success res = fromJSON val
+  in res
 
 -- | The RequestResource instance for POST requests.
 instance
-  (ToJSON req,
-  FromJSON resp,
-  RequestBuilder path)
-  => RequestResource path ('HttpPost req resp) where
+  (ToJSON body,
+  FromJSON resp)
+  => RequestMethod ('HttpPost body resp) where
 
-  type RequestMethodSig ('HttpPost req resp) = req -> IO resp
+  type RequestMethodFn f ('HttpPost body resp) = body -> f resp
 
-  requestResourceK ::
-       (Request -> IO (Response LBS.ByteString))
-    -> Text
-    -> RestSig path ('HttpPost req resp)
-    -> RequestPathSig path (RequestMethodSig ('HttpPost req resp))
+  requestMethod :: Functor f =>
+       Proxy ('HttpPost body resp)
+    -> (Request -> f LBS.ByteString)
+    -> Request
+    -> RequestMethodFn f ('HttpPost body resp)
 
-  requestResourceK issuer hostNm _ =
-    requestBuilder
-      (Proxy :: Proxy path)
-      (\req body -> decodeResp <$> issuer (encodeRequest req body))
+  requestMethod _ act request body = parseNonRfcJson <$> act (setMethod request)
 
     where
 
-      encodeRequest :: Request -> req -> Request
-      encodeRequest request body = request {
-        method = methodPost,
-        host = encodeUtf8 hostNm,
-        requestBody = RequestBodyLBS (encode body) }
+      setMethod :: Request -> Request
+      setMethod req = req {
+          method = methodPost,
+          requestBody = RequestBodyLBS (encode body)
+        }
 
-      decodeResp :: Response LBS.ByteString -> resp
-      decodeResp = fromJust . decode . responseBody
+-- | Given an continuation capable of executing requests, construct and
+-- execute requests using 'RequestPathFn' and 'RequestMethodFn'.
+requestK ::
+  (Functor f, RequestPath path, RequestMethod method) =>
+     Proxy (RestSig path method)
+  -> (Request -> f LBS.ByteString)
+  -> Request
+  -> RequestPathFn path (RequestMethodFn f method)
+requestK (_ :: Proxy (RestSig path method)) act request = requestPath
+    pathProxy (requestMethod methodProxy act . setPath) basePath
 
--- | Request a resource: @requestResource manager hostname signature
--- \<RequestPathSig arguments\>@. The 'Manager' concept is from the @http-client@ package.
-requestResource ::
-  RequestResource path method =>
+  where
+    pathProxy   = Proxy :: Proxy path
+    methodProxy = Proxy :: Proxy method
+    basePath  = toPathComponents $ BSU8.toString $ path request
+    setPath p = request { path = BSU8.fromString $ fromPathComponents p }
+
+toPathComponents :: String -> [String]
+toPathComponents = filter (/=[]) . foldr splitPath []
+  where
+    splitPath '/' ps      = []:ps
+    splitPath c   (p:ps)  = (c:p):ps
+    splitPath c   []      = [[c]]
+
+fromPathComponents :: [String] -> String
+fromPathComponents [] = "/"
+fromPathComponents (p:ps) = '/': (p ++ fromPathComponents ps)
+
+-- | Actually execute a request constructed with 'RequestPathFn' and
+-- 'RequestMethodFn'.
+requestHttpClient ::
+  (RequestPath path, RequestMethod method) =>
+    Proxy (RestSig path method) ->
     Manager ->
-    Text ->
-    RestSig path method ->
-    RequestPathSig path (RequestMethodSig method)
+    Request ->
+    RequestPathFn path (RequestMethodFn IO method)
+requestHttpClient p man baseReq = requestK p ((responseBody <$>) . flip httpLbs man) baseReq
 
-requestResource man hostNm sig = requestResourceK (flip httpLbs man) hostNm sig
+-- | Actually execute a request constructed with 'RequestPathFn' and
+-- 'RequestMethodFn'. If you worry about resource management, use
+-- 'requestHttpClient' instead.
+requestHttpClientDef ::
+  (RequestPath path, RequestMethod method) =>
+    Proxy (RestSig path method) ->
+    Request ->
+    RequestPathFn path (RequestMethodFn IO method)
 
--- | Request a resource, using the default 'Manager' as defined in @http-client@.
-requestResourceDef ::
-  RequestResource path method =>
-    Text ->
-    RestSig path method ->
-    RequestPathSig path (RequestMethodSig method)
-
-requestResourceDef hostNm sig = requestResourceK
+requestHttpClientDef p baseReq = requestK p
   (\req -> do
     man <- newManager defaultManagerSettings
-    resp <- httpLbs req man
+    resp <- responseBody <$> httpLbs req man
     closeManager man
-    return resp) hostNm sig
+    return resp) baseReq
