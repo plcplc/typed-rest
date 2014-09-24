@@ -30,14 +30,17 @@ module Network.HTTP.Rest.Server (
 
 import GHC.TypeLits
 
+import Control.Monad
+
 
 import Data.Aeson (FromJSON,ToJSON, decode, encode)
 import Data.Monoid
 import Data.Text (Text, pack)
 import Data.Typeable
 
-import Network.HTTP.Types.Header (ResponseHeaders)
-import Network.HTTP.Types.Status (Status, status404, status500)
+import Network.HTTP.Types
+-- import Network.HTTP.Types.Header (ResponseHeaders)
+-- import Network.HTTP.Types.Status (Status, status404, status500)
 import Network.Wai (Application, Request(..), Response, ResponseReceived, lazyRequestBody, responseLBS)
 
 import Network.HTTP.Rest.Signature
@@ -158,6 +161,7 @@ instance (ApplyHttpPathFn pathSig, ToJSON resp) => ServeResource pathSig ('HttpG
     RestSig pathSig ('HttpGet resp) -> HttpMethodFn pathSig ('HttpGet resp) -> PartialApplication
   serveRest _ fn = PA $ \request -> do
     let path = pathInfo request
+    when (requestMethod request /= methodGet) Nothing
     act <- applyHttpPathFn (Proxy :: Proxy pathSig) path fn :: Maybe (() -> IO (ResponseType resp))
     return $ \respondC -> do
       (status, headers, res) <- act ()
@@ -175,6 +179,7 @@ instance (ApplyHttpPathFn pathSig, FromJSON req, ToJSON resp) => ServeResource p
     let path = pathInfo request
     in do
       act <- applyHttpPathFn (Proxy :: Proxy pathSig) path fn :: Maybe (req -> IO (ResponseType resp))
+      when (requestMethod request /= methodPost) Nothing
       return $ \respondC -> do
         reqBS <- lazyRequestBody request
         case decode reqBS of
