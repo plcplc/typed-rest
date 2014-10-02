@@ -1,0 +1,6 @@
+:set -isrc -itest
+:set -Wall
+:set -fdefer-type-errors
+:set -XOverloadedStrings
+:set -XDataKinds
+:set -XTypeOperators

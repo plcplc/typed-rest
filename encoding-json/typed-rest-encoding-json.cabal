@@ -1,0 +1,37 @@
+name: typed-rest-encoding-json
+version: 0.0.0.1
+synopsis: Typed REST resources - JSON payload encoding
+homepage: https://github.com/plcplc/typed-rest
+license: GPL-3
+license-file: LICENSE
+author: Philip Lykke Carlsen
+maintainer: plcplc@gmail.com
+build-type: Simple
+cabal-version: >=1.10
+
+flag releaseBuild
+  description: Build for release. I.e. enable more checks.
+  default: True
+  manual: True
+
+library
+  exposed-modules:
+    Data.Aeson.NonRFC
+    Network.HTTP.Rest.Encoding.JSON
+
+  build-depends:
+    aeson,
+    attoparsec,
+    base == 4.7.*,
+    bytestring,
+    text,
+    typed-rest-types
+
+  hs-source-dirs: src
+
+  default-language: Haskell2010
+
+  if flag(releaseBuild)
+    ghc-options: -Wall -fno-warn-unused-do-bind -Werror
+  else
+    ghc-options: -Wall -fno-warn-unused-do-bind
