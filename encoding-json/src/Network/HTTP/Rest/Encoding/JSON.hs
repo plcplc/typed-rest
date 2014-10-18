@@ -1,11 +1,13 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Network.HTTP.Rest.Encoding.JSON ( JSONEncoding ) where
 
 import qualified Data.ByteString.Lazy as LBS
 import Data.Aeson
 import Data.Aeson.NonRFC
+import Data.Text ()
 
 import Network.HTTP.Rest.Signature
 

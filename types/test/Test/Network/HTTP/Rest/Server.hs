@@ -1,9 +1,10 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
-{-# OPTIONS_GHC -fno-warn-missing-signatures #-}
+{-# OPTIONS_GHC -fno-warn-missing-signatures -fno-warn-orphans #-}
 module Test.Network.HTTP.Rest.Server where
 
+import Control.Monad.Identity
 import Data.Maybe
 import Data.Proxy
 import Test.Hspec
@@ -61,24 +62,28 @@ serverSpec = describe "The typed-rest Server" $ do
   context "when pattern matching methods" $ do
 
     it "accepts GET requests correctly" $ do
-      let getApp = serveMethod methodGetBoolPx identityEncPx GET Nothing True
+      let getApp = serveMethod methodGetBoolPx identityEncPx GET Nothing (Identity True)
       shouldSatisfy getApp isJust
 
     it "rejects GET requests correctly" $ do
-      let getApp = serveMethod methodGetBoolPx identityEncPx POST Nothing True
+      let getApp = serveMethod methodGetBoolPx identityEncPx POST Nothing (Identity True)
       shouldSatisfy getApp (not . isJust)
 
     it "accepts POST requests correctly" $ do
-      let postApp = serveMethod methodPostBoolPx identityEncPx POST (Just $ payloadEncode identityEncPx True) id
+      let postApp = serveMethod methodPostBoolPx identityEncPx POST (Just $ payloadEncode identityEncPx True) Identity
       shouldSatisfy postApp isJust
 
-      let postApp' = serveMethod methodPostBoolPx identityEncPx POST (Just $ payloadEncode identityEncPx False) id
+      let postApp' = serveMethod methodPostBoolPx identityEncPx POST (Just $ payloadEncode identityEncPx False) Identity
       shouldSatisfy postApp' isJust
 
     it "rejects POST requests correctly" $ do
-      let postApp = serveMethod methodPostBoolPx identityEncPx GET Nothing id
-      shouldSatisfy postApp (not .isJust)
+      let postApp = serveMethod methodPostBoolPx identityEncPx GET Nothing Identity
+      shouldSatisfy postApp (not . isJust)
 
   {-
   it "can properly pattern match PartialApplications" pending
   -}
+
+-- For 'shouldSatisfy'.
+instance (Show a) => Show (Identity a) where
+  show (Identity x) = "Identity " ++ show x
