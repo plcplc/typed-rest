@@ -1,6 +1,7 @@
 ﻿{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE TypeFamilies #-}
 module Test.PayloadEncoding where
 
@@ -11,8 +12,9 @@ import Network.HTTP.Rest.Signature
 
 data IdentityEncoding
 
-instance Typeable a => PayloadEncoding IdentityEncoding a where
+instance PayloadEncoding IdentityEncoding where
 
+  type Encoder IdentityEncoding a = Typeable a
   type EncodedRepr IdentityEncoding = Dynamic
 
   payloadEncode _   = toDyn

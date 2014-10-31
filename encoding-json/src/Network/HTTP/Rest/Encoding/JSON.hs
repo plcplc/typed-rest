@@ -14,8 +14,9 @@ import Network.HTTP.Rest.Signature
 -- | Encoding marker for PayloadEncoding.
 data JSONEncoding
 
-instance (FromJSON a, ToJSON a) => PayloadEncoding JSONEncoding a where
+instance PayloadEncoding JSONEncoding where
 
+  type Encoder JSONEncoding a = (FromJSON a, ToJSON a)
   type EncodedRepr JSONEncoding = LBS.ByteString
 
   payloadDecode _ = parseNonRfcJson

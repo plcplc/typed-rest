@@ -20,6 +20,7 @@ flag releaseBuild
 library
   exposed-modules:
     Network.HTTP.Rest.Client
+    Network.HTTP.Rest.Match
     Network.HTTP.Rest.Server
     Network.HTTP.Rest.Signature
 

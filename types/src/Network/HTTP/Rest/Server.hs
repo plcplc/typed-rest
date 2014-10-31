@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE KindSignatures #-}
@@ -27,17 +28,76 @@ module Network.HTTP.Rest.Server (
   Serve,
   PartialApplication(..),
 
+  -- Pattern matching types and methods
+  PartialApplicationPat(..),
+  MatchResource(..),
+  BodyPat(..),
+  PathPat,
+  guardMethod,
+  pPat,
+  bodyDecodePat,
+  bodyPat
+
   ) where
 
 import Control.Applicative
-import Control.Monad
+import Data.Maybe
 import Data.Monoid
 import Data.Proxy
+import Data.Typeable
 import Data.Text (Text, pack)
 import GHC.TypeLits
 import Network.HTTP.Types
 
 import Network.HTTP.Rest.Signature
+import Network.HTTP.Rest.Match
+
+data BodyPat = BodyMissing | BodyPresent | BodyDecodableAs Text
+  deriving (Show, Eq)
+
+-- | A type that indicates how well a request matches a resource
+data MatchResource =
+    MatchMethod (Expected StdMethod StdMethod)
+  | MatchBody (Expected BodyPat ())
+  | MatchPath PathPat
+  deriving (Eq, Show)
+
+-- | The pattern expectation of path components.
+type PathPat = [Expected (Maybe Text) (Maybe Text)]
+
+-- | Pattern function for expressing the expectation of a path component. 
+pPat ::
+  Show (MyProxy comp) =>
+  Proxy (comp :/: rest) -> Maybe Text -> Bool -> PathPat
+pPat (_ :: Proxy (comp :/: rest)) txt sat
+  = [Expected (Just . pack . show $ (MyProxy :: MyProxy comp)) txt sat]
+
+guardMethod :: StdMethod -> StdMethod -> Match [MatchResource] ()
+guardMethod expectM actualM = guard' ((:[]) . MatchMethod . Expected expectM actualM) (expectM == actualM) 
+
+bodyPat :: BodyPat -> Bool -> [MatchResource]
+bodyPat bp = ((:[]) . MatchBody . Expected bp ())
+
+bodyDecodePat :: PayloadEncoding enc => Proxy enc -> Bool -> [MatchResource]
+bodyDecodePat encPx = bodyPat (BodyDecodableAs $ payloadMimeType encPx)
+
+newtype PartialApplicationPat = PAP [MatchResource]
+  deriving Eq
+
+instance Show PartialApplicationPat where
+  show (PAP matchRes) = unlines $ map show matchRes
+
+-- | A composable wrapper for serving 'RestSig' server functions. The only
+-- requirement for composability is that each served signature shares the
+-- same encoded representation.
+newtype PartialApplication f repr =
+  PA { unPA :: StdMethod -> [Text] -> Maybe repr -> Match [PartialApplicationPat] (f repr) }
+
+instance Monoid (PartialApplication f repr) where
+  mempty = PA $ \_ _ _ -> matchFail (const [])
+
+  mappend (PA pa1) (PA pa2)
+    = PA $ \m p b -> matchCase [pa1 m p b, pa2 m p b]
 
 -- | A type class for applying functions that correspond to a 'RestSig' of
 -- a request, pattern matching on the path to the resource.
@@ -45,35 +105,45 @@ class ServePath (path :: HttpPathKind) where
 
   type ServePathFn path result :: *
 
-  servePath :: Proxy path -> [Text] -> ServePathFn path result -> Maybe result
+  servePath ::
+       Proxy path
+    -> [Text]
+    -> Match PathPat (ServePathFn path result)
+    -> Match PathPat result
 
 instance ServePath Nil where
 
   type ServePathFn Nil result = result
 
-  servePath _ [] fn = Just fn
-  servePath _ _  _  = Nothing
+  servePath _ ps fn
+    = guard' (\g -> map (\x -> Expected Nothing (Just x) g) ps) ([]==ps)
+      *> fn
 
 instance
-  (KnownSymbol path,
-   ServePath rest)
-  =>ServePath (S path :/: rest) where
+  (ServePath rest,
+   KnownSymbol path)
+  => ServePath (S path :/: rest) where
 
   type ServePathFn (S path :/: rest) result = ServePathFn rest result
 
   servePath ::
        Proxy (S path :/: rest)
     -> [Text]
-    -> ServePathFn (S path :/: rest) result
-    -> Maybe result
+    -> Match PathPat (ServePathFn (S path :/: rest) result)
+    -> Match PathPat result
 
-  servePath _ (p:ps) fn | p == pack (symbolVal (Proxy :: Proxy path))
-    = servePath (Proxy :: Proxy rest) ps fn
-  servePath _ _      _
-    = Nothing
+  servePath pPx (p:ps) fn
+    = guard' (pPat pPx (Just p)) (sText (pathHead pPx) == p)
+      *> servePath (pathTail pPx) ps fn
+
+  servePath pPx [] fn
+    = matchFail (pPat pPx Nothing)
+      *> servePath (pathTail pPx) [] fn
 
 instance
   (HttpPathArgument a,
+   KnownSymbol path,
+   Typeable a,
    ServePath rest)
   => ServePath (A path a :/: rest) where
 
@@ -82,63 +152,72 @@ instance
   servePath ::
        Proxy (A path a :/: rest)
     -> [Text]
-    -> ServePathFn (A path a :/: rest) result
-    -> Maybe result
+    -> Match PathPat (ServePathFn (A path a :/: rest) result)
+    -> Match PathPat result
 
-  servePath _ (p:ps) fn | Just x <- fromPathArg p
-    = servePath (Proxy :: Proxy rest) ps (fn x)
-  servePath _ _      _
-    = Nothing
+  servePath pPx (p:ps) fn
+    = servePath (pathTail pPx) ps (fn <*> match (pPat pPx (Just p)) (fromPathArg p))
+
+  servePath pPx [] fn
+    = servePath (pathTail pPx) [] (fn <*> matchFail (pPat pPx Nothing))
 
 -- | A type class for applying functions that correspond to a 'RestSig' of
 -- a request, pattern matching on the request method and associated data.
 class ServeMethod (method :: HttpMethodKind) encoding where
 
-  type ServeMethodFn method :: *
+  type ServeMethodFn (f :: * -> *) method :: *
 
-  serveMethod ::
+  serveMethod :: Functor f =>
        Proxy method
     -> Proxy encoding
-    -> StdMethod
-    -> Maybe (EncodedRepr encoding)
-    -> ServeMethodFn method
-    -> Maybe (EncodedRepr encoding)
+    -> StdMethod                    -- Request method
+    -> Maybe (EncodedRepr encoding) -- Request body
+    -> Match [MatchResource] (ServeMethodFn f method)
+    -> Match [MatchResource] (f (EncodedRepr encoding))
 
-instance (PayloadEncoding encoding result)
+instance
+  (PayloadEncoding encoding,
+   Encoder encoding result)
   => ServeMethod (HttpGet result) encoding where
 
-  type ServeMethodFn (HttpGet result) = result
+  type ServeMethodFn f (HttpGet result) = f result
 
-  serveMethod ::
+  serveMethod :: Functor f =>
        Proxy (HttpGet result)
     -> Proxy encoding
     -> StdMethod
     -> Maybe (EncodedRepr encoding)
-    -> ServeMethodFn (HttpGet result)
-    -> Maybe (EncodedRepr encoding)
+    -> Match [MatchResource] (ServeMethodFn f (HttpGet result))
+    -> Match [MatchResource] (f (EncodedRepr encoding))
 
-  serveMethod _ _ method body x | method == GET, Nothing <- body
-    = Just (payloadEncode (Proxy :: Proxy encoding) x)
-  serveMethod _ _ _      _    _
-    = Nothing
+  serveMethod _ encPx method body x
+    =  guardMethod GET method
+    *> guard' (bodyPat BodyMissing) (isNothing body)
+    *> ((payloadEncode encPx <$>) <$> x)
 
-instance (PayloadEncoding encoding result, PayloadEncoding encoding body)
+instance
+  (PayloadEncoding encoding,
+   Encoder encoding body,
+   Encoder encoding result)
   => ServeMethod (HttpPost body result) encoding where
 
-  type ServeMethodFn (HttpPost body result) = body -> result
+  type ServeMethodFn f (HttpPost body result) = body -> f result
 
-  serveMethod ::
+  serveMethod :: Functor f =>
        Proxy (HttpPost body result)
     -> Proxy encoding
     -> StdMethod
     -> Maybe (EncodedRepr encoding)
-    -> ServeMethodFn (HttpPost body result)
-    -> Maybe (EncodedRepr encoding)
+    -> Match [MatchResource] (ServeMethodFn f (HttpPost body result))
+    -> Match [MatchResource] (f (EncodedRepr encoding))
 
-  serveMethod _ _ method bodyMaybe fn | method == POST, Just body <- bodyMaybe
-    = payloadEncode (Proxy :: Proxy encoding) . fn <$> payloadDecode (Proxy :: Proxy encoding) body
-  serveMethod _ _ _      _    _
-    = Nothing
+  serveMethod _ encPx method body fn
+    = guardMethod POST method
+      *> ((payloadEncode encPx <$>)
+          <$> (fn <*> (do
+                body' <- match (bodyPat BodyPresent) body
+                match (bodyDecodePat encPx) $ payloadDecode encPx body'
+              )))
 
 class (ServePath path, ServeMethod method encoding)
   => Serve path method encoding where
@@ -148,33 +227,24 @@ instance (ServePath path, ServeMethod method encoding)
 
 -- | Pattern match a signature on an incoming request, represented by
 -- a method, path and optional request body.
-serveRequest ::
+serveRequest :: Functor f =>
   (Serve path method encoding)
   => Proxy (RestSig path method encoding)
   -> StdMethod
   -> [Text]
   -> Maybe (EncodedRepr encoding)
-  -> ServePathFn path (ServeMethodFn method)
-  -> Maybe (EncodedRepr encoding)
+  -> ServePathFn path (ServeMethodFn f method)
+  -> Match [MatchResource] (f (EncodedRepr encoding))
 
-serveRequest (_ :: Proxy (RestSig path method encoding)) method path body =
-  servePath (Proxy :: Proxy path) path
-  >=> serveMethod (Proxy :: Proxy method) (Proxy :: Proxy encoding) method body
+serveRequest (_ :: Proxy (RestSig path method encoding)) method ps body
+  = serveMethod (Proxy :: Proxy method) (Proxy :: Proxy encoding) method body
+  . mapMatch ((:[]) . MatchPath)
+  . servePath (Proxy :: Proxy path) ps
+  . pure
 
--- | A composable wrapper for serving 'RestSig' server functions. The only
--- requirement for composability is that each served signature shares the
--- same encoded representation.
-newtype PartialApplication repr = PA { unPA :: StdMethod -> [Text] -> Maybe repr -> Maybe repr }
-
-instance Monoid (PartialApplication repr) where
-  mempty = PA $ \_ _ _ -> Nothing
-  mappend (PA pa1) (PA pa2) = PA $ \method path body -> getFirst $
-    First (pa1 method path body)
-    <> First (pa2 method path body)
-
-serve ::
+serve :: Functor f =>
   (Serve path method encoding)
   => Proxy (RestSig path method encoding)
-  -> ServePathFn path (ServeMethodFn method)
-  -> PartialApplication (EncodedRepr encoding)
-serve sigPx fn = PA $ \method path body -> serveRequest sigPx method path body fn
+  -> ServePathFn path (ServeMethodFn f method)
+  -> PartialApplication f (EncodedRepr encoding)
+serve sigPx fn = PA $ \method path body -> mapMatch ((:[]) . PAP) $ serveRequest sigPx method path body fn

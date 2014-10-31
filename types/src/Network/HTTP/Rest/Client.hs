@@ -132,7 +132,10 @@ class RequestMethod (method :: HttpMethodKind) encoding where
     -> RequestMethodFn m method
 
 -- | The RequestMethod instance for GET requests.
-instance (PayloadEncoding encoding resp) => RequestMethod ('HttpGet resp) encoding where
+instance
+  (PayloadEncoding encoding,
+   Encoder encoding resp)
+  => RequestMethod ('HttpGet resp) encoding where
 
   type RequestMethodFn m ('HttpGet resp) = m (HttpClientResult resp)
 
@@ -142,8 +145,9 @@ instance (PayloadEncoding encoding resp) => RequestMethod ('HttpGet resp) encodi
 
 -- | The RequestResource instance for POST requests.
 instance
-  (PayloadEncoding encoding body,
-  PayloadEncoding encoding resp)
+  (PayloadEncoding encoding,
+   Encoder encoding body,
+   Encoder encoding resp)
   => RequestMethod ('HttpPost body resp) encoding where
 
   type RequestMethodFn m ('HttpPost body resp) = body -> m (HttpClientResult resp)

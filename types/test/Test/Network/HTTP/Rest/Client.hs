@@ -60,4 +60,4 @@ clientSpec = describe "The typed-rest client" $ do
       shouldBe (payloadDecode identityEncPx =<< body) (Just ("Foo" :: String))
       return $ payloadEncode identityEncPx ("Test" :: String)) "Foo"
 
-    shouldBe res (Success "Test")
+    shouldBe res (Success ("Test" :: String))

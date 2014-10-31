@@ -5,14 +5,15 @@
 module Test.Network.HTTP.Rest.Server where
 
 import Control.Monad.Identity
-import Data.Maybe
 import Data.Proxy
 import Test.Hspec
 import Network.HTTP.Types
 
-import Network.HTTP.Rest.Signature
+import Network.HTTP.Rest.Match
 import Network.HTTP.Rest.Server
+import Network.HTTP.Rest.Signature
 
+import Test.Network.HTTP.Rest.Match
 import Test.PayloadEncoding
 
 type ConstantPath = S "foo" :/: S "bar" :/: Nil
@@ -34,51 +35,56 @@ serverSpec = describe "The typed-rest Server" $ do
   context "when pattern matching paths" $ do
 
     it "accepts nil correctly" $ do
-      let constApp = servePath nilPathPx [] ()
-      shouldSatisfy constApp isJust
+      let constApp = servePath nilPathPx [] (return ())
+      shouldSatisfy constApp isMatchSuccess
 
     it "rejects nil correctly" $ do
-      let constApp = servePath nilPathPx ["foo", "floo"] ()
-      shouldBe constApp Nothing
+      let constApp = servePath nilPathPx ["foo", "floo"] (return ())
+      shouldSatisfy constApp isMatchFailed
 
     it "accepts constants correctly" $ do
-      let constApp = servePath constantPathPx ["foo", "bar"] ()
-      shouldSatisfy constApp isJust
+      let constApp = servePath constantPathPx ["foo", "bar"] (return ())
+      shouldSatisfy constApp isMatchSuccess
 
     it "rejects constants correctly" $ do
-      let constApp' = servePath constantPathPx ["foo", "floo"] ()
-      shouldBe constApp' Nothing
-      let constApp'' = servePath constantPathPx ["foo"] ()
-      shouldBe constApp'' Nothing
+      let constApp' = servePath constantPathPx ["foo", "floo"] (return ())
+      shouldSatisfy constApp' isMatchFailed
+      let constApp'' = servePath constantPathPx ["foo"] (return ())
+      shouldSatisfy constApp'' isMatchFailed
 
     it "accepts parameters correctly" $ do
-      let paramApp = servePath parametrisedPathPx ["7"] id
-      shouldBe paramApp (Just 7)
+      let paramApp = servePath parametrisedPathPx ["7"] (return id)
+      shouldSatisfy paramApp (matched 7)
 
     it "rejects parameters correctly" $ do
-      let paramApp = servePath parametrisedPathPx ["foo"] (const ())
-      shouldBe paramApp Nothing
+      let paramApp = servePath parametrisedPathPx ["foo"] (return $ const ())
+      shouldSatisfy paramApp isMatchFailed
 
   context "when pattern matching methods" $ do
 
     it "accepts GET requests correctly" $ do
-      let getApp = serveMethod methodGetBoolPx identityEncPx GET Nothing (Identity True)
-      shouldSatisfy getApp isJust
+      let getApp = serveMethod methodGetBoolPx identityEncPx GET Nothing (return $ Identity True)
+      shouldSatisfy getApp isMatchSuccess
 
     it "rejects GET requests correctly" $ do
-      let getApp = serveMethod methodGetBoolPx identityEncPx POST Nothing (Identity True)
-      shouldSatisfy getApp (not . isJust)
+      let getApp = serveMethod methodGetBoolPx identityEncPx POST Nothing (return $ Identity True)
+      shouldSatisfy getApp isMatchFailed
 
     it "accepts POST requests correctly" $ do
-      let postApp = serveMethod methodPostBoolPx identityEncPx POST (Just $ payloadEncode identityEncPx True) Identity
-      shouldSatisfy postApp isJust
+      let postApp = serveMethod methodPostBoolPx identityEncPx POST
+            (Just $ payloadEncode identityEncPx True) (return Identity)
+      shouldSatisfy postApp isMatchSuccess
 
-      let postApp' = serveMethod methodPostBoolPx identityEncPx POST (Just $ payloadEncode identityEncPx False) Identity
-      shouldSatisfy postApp' isJust
+      {-
+      let postApp' = serveMethod methodPostBoolPx identityEncPx POST
+          (Just $ payloadEncode identityEncPx False) (return Identity)
+      shouldSatisfy postApp' (matched $ Identity False)
+      -}
 
     it "rejects POST requests correctly" $ do
-      let postApp = serveMethod methodPostBoolPx identityEncPx GET Nothing Identity
-      shouldSatisfy postApp (not . isJust)
+      let postApp = serveMethod methodPostBoolPx identityEncPx GET
+            Nothing (return Identity)
+      shouldSatisfy postApp isMatchFailed
 
   {-
   it "can properly pattern match PartialApplications" pending

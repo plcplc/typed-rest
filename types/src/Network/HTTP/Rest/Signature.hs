@@ -1,3 +1,4 @@
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -15,7 +16,7 @@
 -- clients.
 module Network.HTTP.Rest.Signature (
 
-  -- * REST Resource Signatures.
+  -- * REST Resource Signatures
   RestSig(..),
   HttpMethodKind(..),
   HttpPathKind(..),
@@ -23,10 +24,17 @@ module Network.HTTP.Rest.Signature (
   HttpPathArgument(..),
   PayloadEncoding(..),
 
+  -- Auxiliary definitions
+  MyProxy(..),
+  sText,
+  pathHead,
+  pathTail
+
   ) where
 
 import Data.Text (Text, pack, unpack)
 import Data.Typeable
+import GHC.Exts
 import GHC.TypeLits
 
 -- | 'Proxy' defines its own, useless 'Show' instance :-(.
@@ -85,6 +93,16 @@ instance (Show (MyProxy c), Show (MyProxy httpPath)) => Show (MyProxy (c :/: htt
 instance Show (MyProxy Nil) where
   show _ = ""
 
+-- | Extract a constant of a path component.
+sText :: (KnownSymbol path) => Proxy (S path) -> Text
+sText (_ :: Proxy (S path)) = pack $ symbolVal (Proxy :: Proxy path)
+
+pathHead :: Proxy (path :/: rest) -> Proxy path
+pathHead Proxy = Proxy
+
+pathTail :: Proxy (path :/: rest) -> Proxy rest
+pathTail Proxy = Proxy
+
 -- | To properly serialise HttpPathFn path arguments we need a dedicated
 -- typeclass, as opposed to just Show or ToJson. Instances of this class should
 -- take care to obey the restrictions of resource paths in Http.
@@ -109,10 +127,11 @@ instance HttpPathArgument Int where
     _         -> Nothing
 
 -- | A type class for specifying request/response payload encodings.
-class PayloadEncoding enc a where
+class PayloadEncoding enc where
 
+  type Encoder enc a ::Constraint
   type EncodedRepr enc :: *
 
-  payloadDecode   :: Proxy enc -> EncodedRepr enc -> Maybe a
-  payloadEncode   :: Proxy enc -> a -> EncodedRepr enc
+  payloadDecode   :: Encoder enc a => Proxy enc -> EncodedRepr enc -> Maybe a
+  payloadEncode   :: Encoder enc a => Proxy enc -> a -> EncodedRepr enc
   payloadMimeType :: Proxy enc -> Text
